@@ -31,14 +31,13 @@ preprocess = transforms.Compose([
     transforms.ToTensor(),
     ])
 
-trainingImages = Variable(torch.FloatTensor(opt.shotnumber * opt.waynumber, 3, opt.imageSize, opt.imageSize))
+trainingImages = Variable(torch.FloatTensor(opt.shotnumber * opt.waynumber, 1, opt.imageSize, opt.imageSize))
 trainingLables = Variable(torch.FloatTensor(opt.shotnumber * opt.waynumber, opt.waynumber))
-testImages = Variable(torch.FloatTensor(opt.waynumber, 3, opt.imageSize, opt.imageSize))
+testImages = Variable(torch.FloatTensor(opt.waynumber, 1, opt.imageSize, opt.imageSize))
 testLables = Variable(torch.FloatTensor(opt.waynumber, opt.waynumber))
 
 def generateOneTrainingSet() :
     targetSets = np.random.choice(trainingPaths, opt.waynumber, replace=False)
-    lableCount = 0
     for waynumber, eachfolder in enumerate(targetSets):
         allfiles = os.listdir(eachfolder)
         targetfiles = np.random.choice(allfiles, opt.shotnumber+1, replace=False)
@@ -47,13 +46,13 @@ def generateOneTrainingSet() :
             temp_random = np.random.uniform()
             rotate = np.random.choice([0,90,270],1,replace=False)
             imageFile = imageFile.rotate(rotate[0])
+            imageProcess = preprocess(imageFile)
             if eachfile != targetfiles[-1]:
-                trainingImages[waynumber*opt.shotnumber + shotnumber, :, :, :].data.copy_(preprocess(imageFile))
+                trainingImages[waynumber*opt.shotnumber + shotnumber, 0, :, :].data.copy_(imageProcess[0,:,:])
                 trainingLables[waynumber*opt.shotnumber + shotnumber, waynumber].data.fill_(1.0)
             else:
-                testImages[waynumber, :, :, :].data.copy_(preprocess(imageFile))
+                testImages[waynumber, 0, :, :].data.copy_(imageProcess[0,:,:])
                 testLables[waynumber, waynumber].data.fill_(1.0)
-        lableCount += 1
     return trainingImages, trainingLables, testImages, testLables
     # return Variable(trainingImages).cuda(), Variable(trainingLables).cuda(), Variable(testImages).cuda(), Variable(testLables).cuda()
 
@@ -69,7 +68,7 @@ class featureNet(nn.Module):
         super(featureNet, self).__init__()
         self.model = nn.Sequential(
                 nn.ConvTranspose2d(
-                    in_channels = 3,
+                    in_channels = 1,
                     out_channels = 64,
                     kernel_size = 3,
                     stride = 1,

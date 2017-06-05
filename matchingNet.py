@@ -54,7 +54,6 @@ def generateOneTrainingSet() :
                 testImages[waynumber, 0, :, :].data.copy_(imageProcess[0,:,:])
                 testLables[waynumber, waynumber].data.fill_(1.0)
     return trainingImages, trainingLables, testImages, testLables
-    # return Variable(trainingImages).cuda(), Variable(trainingLables).cuda(), Variable(testImages).cuda(), Variable(testLables).cuda()
 
 def weights_init(m):
 	if isinstance(m, nn.ConvTranspose2d):
@@ -67,7 +66,7 @@ class featureNet(nn.Module):
     def __init__(self):
         super(featureNet, self).__init__()
         self.model = nn.Sequential(
-                nn.ConvTranspose2d(
+                nn.Conv2d(
                     in_channels = 1,
                     out_channels = 64,
                     kernel_size = 3,
@@ -76,9 +75,9 @@ class featureNet(nn.Module):
                     ),
                 nn.BatchNorm2d(64),
                 nn.ReLU(inplace = True),
-                nn.MaxPool2d(2),
+                nn.MaxPool2d(kernel_size = 2),
                 
-                nn.ConvTranspose2d(
+                nn.Conv2d(
                     in_channels = 64,
                     out_channels = 64,
                     kernel_size = 3,
@@ -87,10 +86,10 @@ class featureNet(nn.Module):
                     ),
                 nn.BatchNorm2d(64),
                 nn.ReLU(inplace = True),
-                nn.MaxPool2d(2),
+                nn.MaxPool2d(kernel_size = 2),
                 
                 
-                nn.ConvTranspose2d(
+                nn.Conv2d(
                     in_channels = 64,
                     out_channels = 64,
                     kernel_size = 3,
@@ -99,30 +98,30 @@ class featureNet(nn.Module):
                     ),
                 nn.BatchNorm2d(64),
                 nn.ReLU(inplace = True),
-                nn.MaxPool2d(2),
+                nn.MaxPool2d(kernel_size = 2),
                 
-                nn.ConvTranspose2d(
-                    in_channels = 64,
-                    out_channels = 64,
-                    kernel_size = 3,
-                    stride = 1,
-                    padding = 0
-                    ),
-                nn.BatchNorm2d(64),
-                nn.ReLU(inplace = True),
-                nn.MaxPool2d(2)
+                # nn.Conv2d(
+                    # in_channels = 64,
+                    # out_channels = 64,
+                    # kernel_size = 3,
+                    # stride = 1,
+                    # padding = 0
+                    # ),
+                # nn.BatchNorm2d(64),
+                # nn.ReLU(inplace = True),
+                # nn.MaxPool2d(kernel_size = 2),
+
                 )
     def forward(self, x):
         output = self.model(x)
-        return output
+        return output.view(-1,64)
 
 featureGenNet = featureNet()
 featureGenNet.apply(weights_init)
 featureGenNet.cuda()
 trainIm, _,_,_ = generateOneTrainingSet()
 trainIm = trainIm.cuda()
-output = featureGenNet(trainIm)
-print (output)
+feature_CNN = featureGenNet(trainIm)
 
 
 

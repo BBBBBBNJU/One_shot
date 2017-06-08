@@ -11,6 +11,7 @@ import torch.utils.data
 import torchvision.datasets as dset
 import torchvision.transforms as transforms
 import torchvision.utils as vutils
+import torch.nn.functional as F
 import numpy as np
 from torch.autograd import Variable
 from PIL import Image
@@ -119,11 +120,114 @@ class featureNet(nn.Module):
 featureGenNet = featureNet()
 featureGenNet.apply(weights_init)
 featureGenNet.cuda()
-trainIm, _,_,_ = generateOneTrainingSet()
+trainIm, trainLabel,  testIm, testLabel = generateOneTrainingSet()
 trainIm = trainIm.cuda()
-feature_CNN = featureGenNet(trainIm)
+trainLabel = trainLabel.cuda()
+testIm = testIm.cuda()
+testLabel = testLabel.cuda()
+
+feature_train = featureGenNet(trainIm)
+feature_test = featureGenNet(testIm)
+
+class AttenLSTMCell(nn.Module):
+    """ most code from https://github.com/jihunchoi/recurrent-batch-normalization-pytorch/blob/master/bnlstm.py """
+    def __init__(self, featureDim, use_bias=True):
+        super(AttenLSTMCell, self).__init__()
+        self.featureDim = featureDim
+        self.use_bias = use_bias
+        self.weight_ih = nn.Parameter(
+            torch.FloatTensor(featureDim, 4 * featureDim))
+        self.weight_hh = nn.Parameter(
+            torch.FloatTensor(2*featureDim, 4 * featureDim))
+        if use_bias:
+            self.bias = nn.Parameter(torch.FloatTensor(4 * featureDim))
+        else:
+            self.register_parameter('bias', None)
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        self.weight_ih.data.set_(
+            init.orthogonal(torch.FloatTensor(*self.weight_ih.size())))
+        weight_hh_data = torch.eye(self.featureDim)
+        weight_hh_data = weight_hh_data.repeat(2, 4)
+        self.weight_hh.data.set_(weight_hh_data)
+        self.bias.data.fill_(0)
+
+    def forward(self, input_, hx):
+        h_0, c_0 = hx
+        batch_size = h_0.size(0)
+        bias_batch = (self.bias.unsqueeze(0)
+                      .expand(batch_size, *self.bias.size()))
+        wh_b = torch.addmm(bias_batch, h_0, self.weight_hh)
+        wi = torch.mm(input_, self.weight_ih)
+        f, i, o, g = torch.split(wh_b + wi,
+                                 split_size=self.featureDim, dim=1)
+        c_1 = torch.sigmoid(f)*c_0 + torch.sigmoid(i)*torch.tanh(g)
+        h_1 = torch.sigmoid(o) * torch.tanh(c_1)
+        return h_1, c_1
+
+    def __repr__(self):
+        s = '{name}({input_size}, {featureDim})'
+        return s.format(name=self.__class__.__name__, **self.__dict__)
 
 
 
+def attLSTM(nn.Module):
+    def __init__(self, featureDim):
+        super(attLSTM, self).__init__()
+        self.featureDim = featureDim
+        self.hidden_h = self.init_hidden(self.featureDim)
+        self.hidden_c = self.init_hidden(self.featureDim)
+        self.hidden_r = self.init_hidden(self.featureDim)
+        self.attLSTMcell = AttenLSTMCell(self.featureDim)
+    
+    def init_hidden(self, hidden_dim):
+        return Variable(torch.randn(1, self.hidden_dim))
 
+    def updateHidden_r(self, trainF):
+        att_ = F.sofrmax(torch.mm(self.hidden_h, torch.transpose(trainF, 0, 1)))
+        att = torch.transpose(att_,0,1).repeat(1, self.featureDim)
+        self.hidden_r = torch.sum(att * trainF, 0)
+        
+    def forward(x):
+        trainF, testF = x
+        trainNumber, _, _ = trainF.size()
+        self.hidden_h , self.hidden_c= attLSTMcell(testF, 
+                (torch.cat((self.hidden_h, self.hidden_r),1), self.hidden_c))
+        self.hidden_h = self.hidden_h + testF
+        self.updateHidden_r(trainF.view(trainNumber, -1))
+        return self.hidden_h
 
+def matchingNet(nn.Module):
+    def __init__(self, trainingSampleNumber, testSampleNumber, featureDim):
+        super(matchingNet, self).__init__()
+        self.featureDim = featureDim
+        self.featureGenNet = featureNet()
+        self.conEmbed_G = nn.LSTM(self.featureDim, self.featureDim, bidirectional = True)
+        self.conEmbed_F = attLSTM(self.featureDim)
+        self.hidden_G = self.init_hidden_G(self.featureDim)
+        self.cond_feature_train = Variable(torch.FloatTensor(trainingSampleNumber, 1, self.featureDim))
+        self.cond_feature_test = Variable(torch.FloatTensor(testSampleNumber, 1, self.featureDim))
+    def init_hidden_G(self, hidden_dim):
+         return (Variable(torch.randn(2, 1, self.hidden_dim)),
+                 Variable(torch.randn(2, 1, self.hidden_dim)))
+   
+    def getCondEmbed_G(self, feature_train):
+        totalOutput, self.hidden_G = self.conEmbed_G(feature_train, self.hidden_G)
+        sampleNumber, _, doubleHidden_dim = totalOutput.size()
+        for i in range(sampleNumber):
+            self.cond_feature_train[i,:,:].data.fill_(totalOutput[i,:,0:doubleHidden_dim/2] + 
+                    totalOutput[trainingSampleNumber - i,:,doubleHidden_dim/2:None] +
+                    feature_train[i,:,:])
+    
+    def getCondEmbed_F(self, feature_train, feature_test):
+        sampleNumber, _, _= feature_test
+        for i in range(sampleNumber):
+            self.cond_feature_test[i,:,:].data.fill_()
+
+    def forward(x):
+        trainIm, trainLabel, testIm, testLabel = x
+        feature_train = featureGenNet(trainIm)
+        feature_test = featureGenNet(testIm)
+        getCondEmbed_G(feature_train)
+        

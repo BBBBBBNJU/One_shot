@@ -1,4 +1,5 @@
 from __future__ import print_function
+import time
 import argparse
 import os
 import random
@@ -20,6 +21,9 @@ parser.add_argument('--dataroot', type=str, default='omniglot', help ='path to d
 parser.add_argument('--shotnumber', type=int, default=1, help='shot number')
 parser.add_argument('--waynumber', type=int, default=5, help='way number')
 parser.add_argument('--imageSize', type=int, default=28, help='input image size')
+parser.add_argument('--lr', type=float, default=0.0002,help='learning rate')
+parser.add_argument('--beta1', type=float, default=0.5, help='beta1 for momentum')
+parser.add_argument('--trainround', type=int, default=200, help='training rounds number')
 opt = parser.parse_args()
 print(opt)
 
@@ -55,6 +59,14 @@ def generateOneTrainingSet() :
                 testImages[waynumber, 0, :, :].data.copy_(imageProcess[0,:,:])
                 testLables[waynumber, waynumber].data.fill_(1.0)
     return trainingImages, trainingLables, testImages, testLables
+
+def cosine_similarity(x1, x2, dim=1, eps=1e-8):
+    """Direct copy from pytorch orginal source code
+    No idea why it can not be imported"""
+    w12 = torch.sum(x1 * x2, dim)
+    w1 = torch.norm(x1, 2, dim)
+    w2 = torch.norm(x2, 2, dim)
+    return (w12 / (w1 * w2).clamp(min=eps)).squeeze()
 
 def weights_init(m):
 	if isinstance(m, nn.ConvTranspose2d):
@@ -117,17 +129,6 @@ class featureNet(nn.Module):
         output = self.model(x)
         return output.view(-1,64)
 
-featureGenNet = featureNet()
-featureGenNet.apply(weights_init)
-featureGenNet.cuda()
-trainIm, trainLabel,  testIm, testLabel = generateOneTrainingSet()
-trainIm = trainIm.cuda()
-trainLabel = trainLabel.cuda()
-testIm = testIm.cuda()
-testLabel = testLabel.cuda()
-
-feature_train = featureGenNet(trainIm)
-feature_test = featureGenNet(testIm)
 
 class AttenLSTMCell(nn.Module):
     """ most code from https://github.com/jihunchoi/recurrent-batch-normalization-pytorch/blob/master/bnlstm.py """
@@ -221,13 +222,51 @@ def matchingNet(nn.Module):
                     feature_train[i,:,:])
     
     def getCondEmbed_F(self, feature_train, feature_test):
-        sampleNumber, _, _= feature_test
+        sampleNumber, _, _= feature_test.size()
         for i in range(sampleNumber):
-            self.cond_feature_test[i,:,:].data.fill_()
+            self.cond_feature_test[i,:,:].data.fill_(self.conEmbed_F((feature_train, feature_test[i,:,:])))
+    
+    def predictLabel(self, vec1, mat1, label1):
+        sampleNumber,_ ,_ = mat1.size()
+        mat2 = vec1.repeat(sampleNumber, 1)
+        temp_sim = cosine_similarity(mat2, mat1, 1) 
+        temp_att = F.sofxmax(temp_sim)
+        return torch.mm(torch.unsqueeze(temp_att,0), label1)  
+    
+    def getLabel(trainLabel):
+        sampleNumber = self.cond_feature_test.size()[0]
+        temp_predictLabel = Variable(torch.FloatTensor(sampleNumber, opt.waynumber))
+        for i in range(sampleNumber):
+            temp_predictLabel[i,:] = predictLabel(self.cond_feature_test[i,:,:], self.cond_feature_train, trainLabel) 
+        return temp_predictLabel
 
     def forward(x):
         trainIm, trainLabel, testIm, testLabel = x
         feature_train = featureGenNet(trainIm)
         feature_test = featureGenNet(testIm)
         getCondEmbed_G(feature_train)
-        
+        getCondEmbed_F(feature_train, feature_test)
+        return getLabel(trainLabel)
+
+ourMatchingNet = matchingNet(opt.waynumber * opt.shotnumber, opt.waynumber, 64)
+ourMatchingNet.cuda()
+print ourMatchingNet
+
+loss_function = nn.NLLLoss()
+optimizer_matchNet = optim.Adam(ourMatchingNet.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999) )
+for iterNumber in range(opt.num_round):
+    start = time()
+    ourMatchingNet.zero_grad()
+    trainIm, trainLabel,  testIm, testLabel = generateOneTrainingSet()
+    trainIm = trainIm.cuda()
+    trainLabel = trainLabel.cuda()
+    testIm = testIm.cuda()
+    testLabel = testLabel.cuda()
+    output = ourMatchingNet((trainIm, trainLabel,  testIm, testLabel))
+    error = loss_function(output, trainLabel)
+    error.backward()
+    optimizer_matchNet.step()
+    sopt = time()
+    print ('[%d/%d] round, loss: %.4f, time %.4f' % (iterNumber, opt.num_round, error.data[0], stop-start))
+
+

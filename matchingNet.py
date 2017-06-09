@@ -268,6 +268,5 @@ for iterNumber in range(opt.num_round):
     optimizer_matchNet.step()
     sopt = time()
     print ('[%d/%d] round, loss: %.4f, time %.4f' % (iterNumber, opt.num_round, error.data[0], stop-start))
-    print (1)
 
 

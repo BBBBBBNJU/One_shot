@@ -170,8 +170,6 @@ class matchingNet(nn.Module):
         self.conEmbed_G = nn.LSTM(self.featureDim, self.featureDim, bidirectional = True)
         self.conEmbed_F = attLSTM(self.featureDim)
         self.hidden_G = self.init_hidden_G(self.featureDim)
-        self.cond_feature_train = Variable(torch.FloatTensor(self.trainingSampleNumber, 1, self.featureDim)).cuda()
-        self.cond_feature_test = Variable(torch.FloatTensor(self.testSampleNumber, 1, self.featureDim)).cuda()
 
     def init_hidden_G(self, hidden_dim):
          return (Variable(torch.randn(2, 1, hidden_dim)).cuda(),
@@ -180,16 +178,20 @@ class matchingNet(nn.Module):
     def getCondEmbed_G(self, feature_train):
         totalOutput, self.hidden_G = self.conEmbed_G(feature_train, self.hidden_G)
         sampleNumber, _, doubleHidden_dim = totalOutput.size()
+        cond_feature_train = Variable(torch.FloatTensor(self.trainingSampleNumber, 1, self.featureDim)).cuda()
         for i in range(sampleNumber):
-            self.cond_feature_train[i,:,:] = totalOutput[i,:,0:doubleHidden_dim/2] + \
+            cond_feature_train[i,:,:] = totalOutput[i,:,0:doubleHidden_dim/2] + \
             totalOutput[self.trainingSampleNumber - 1 - i,:,doubleHidden_dim/2:None] + \
             feature_train[i,:,:]
-    
+        return cond_feature_train
+
     def getCondEmbed_F(self, feature_train, feature_test):
         sampleNumber, _, _= feature_test.size()
+        cond_feature_test = Variable(torch.FloatTensor(self.testSampleNumber, 1, self.featureDim)).cuda()
         for i in range(sampleNumber):
-            self.cond_feature_test[i,:,:] = self.conEmbed_F((feature_train, feature_test[i,:,:]))
-    
+            cond_feature_test[i,:,:] = self.conEmbed_F((feature_train, feature_test[i,:,:]))
+        return cond_feature_test
+
     def predictLabel(self, vec1, mat1, label1):
         sampleNumber,_ ,_ = mat1.size()
         mat2 = vec1.repeat(sampleNumber, 1)
@@ -199,30 +201,30 @@ class matchingNet(nn.Module):
         temp_result = torch.mm(torch.unsqueeze(temp_att,0), label1)  
         return temp_result
     
-    def getLabel(self, trainLabel):
-        sampleNumber = self.cond_feature_test.size()[0]
+    def getLabel(self, cond_feature_train, cond_feature_test, trainLabel):
+        sampleNumber = cond_feature_test.size()[0]
         temp_predictLabel = Variable(torch.FloatTensor(sampleNumber, opt.waynumber)).cuda()
         for i in range(sampleNumber):
-            temp_predictLabel[i,:] = self.predictLabel(self.cond_feature_test[i,:,:], self.cond_feature_train, trainLabel) 
+            temp_predictLabel[i,:] = self.predictLabel(cond_feature_test[i,:,:], cond_feature_train, trainLabel) 
         return temp_predictLabel
 
     def forward(self, x):
         trainIm, trainLabel, testIm, testLabel = x
         feature_train = self.featureGenNet(trainIm)
         feature_test = self.featureGenNet(testIm)
-        self.getCondEmbed_G(feature_train)
-        self.getCondEmbed_F(feature_train, feature_test)
-        return self.getLabel(trainLabel)
+        cond_feature_train = self.getCondEmbed_G(feature_train)
+        cond_feature_test = self.getCondEmbed_F(cond_feature_train, feature_test)
+        return self.getLabel(cond_feature_train, cond_feature_test, trainLabel)
 
 ourMatchingNet = matchingNet(opt.waynumber * opt.shotnumber, opt.waynumber, 64)
 ourMatchingNet.cuda()
 print (ourMatchingNet)
 
-trainingImages = Variable(torch.FloatTensor(opt.shotnumber * opt.waynumber, 1, opt.imageSize, opt.imageSize)).cuda()
-trainingLables = Variable(torch.FloatTensor(opt.shotnumber * opt.waynumber, opt.waynumber)).cuda()
-testImages = Variable(torch.FloatTensor(opt.waynumber, 1, opt.imageSize, opt.imageSize)).cuda()
-testLables = Variable(torch.LongTensor(opt.waynumber)).cuda()
 def generateOneTrainingSet() :
+    trainingImages = Variable(torch.FloatTensor(opt.shotnumber * opt.waynumber, 1, opt.imageSize, opt.imageSize)).cuda()
+    trainingLables = Variable(torch.FloatTensor(opt.shotnumber * opt.waynumber, opt.waynumber)).cuda()
+    testImages = Variable(torch.FloatTensor(opt.waynumber, 1, opt.imageSize, opt.imageSize)).cuda()
+    testLables = Variable(torch.LongTensor(opt.waynumber)).cuda()
     targetSets = np.random.choice(trainingPaths, opt.waynumber, replace=False)
     trainingLables.data.zero_()
     testLables.data.zero_()
@@ -241,16 +243,19 @@ def generateOneTrainingSet() :
             else:
                 testImages[waynumber, 0, :, :].data.copy_(imageProcess[0,:,:])
                 testLables[waynumber] = waynumber
+    return trainingImages, trainingLables,  testImages, testLables
+
+
 m = nn.LogSoftmax()
 loss_function = nn.NLLLoss()
 optimizer_matchNet = optim.Adam(ourMatchingNet.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999) )
 for iterNumber in range(opt.trainround):
     start = time.time()
     ourMatchingNet.zero_grad()
-    generateOneTrainingSet()
+    trainingImages, trainingLables,  testImages, testLables = generateOneTrainingSet()
     output = ourMatchingNet((trainingImages, trainingLables,  testImages, testLables))
     error = loss_function(m(output), testLables)
-    error.backward()
+    error.backward(retain_variables = True)
     optimizer_matchNet.step()
     stop = time.time()
     print ('[%d/%d] round, loss: %.4f, time %.4f' % (iterNumber, opt.trainround, error.data[0], stop-start))

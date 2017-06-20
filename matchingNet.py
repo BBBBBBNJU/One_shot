@@ -1,4 +1,5 @@
 from __future__ import print_function
+from torch.nn import init
 import time
 import argparse
 import os
@@ -35,30 +36,6 @@ preprocess = transforms.Compose([
     transforms.Scale(opt.imageSize),
     transforms.ToTensor(),
     ])
-
-trainingImages = Variable(torch.FloatTensor(opt.shotnumber * opt.waynumber, 1, opt.imageSize, opt.imageSize))
-trainingLables = Variable(torch.FloatTensor(opt.shotnumber * opt.waynumber, opt.waynumber))
-testImages = Variable(torch.FloatTensor(opt.waynumber, 1, opt.imageSize, opt.imageSize))
-testLables = Variable(torch.FloatTensor(opt.waynumber, opt.waynumber))
-
-def generateOneTrainingSet() :
-    targetSets = np.random.choice(trainingPaths, opt.waynumber, replace=False)
-    for waynumber, eachfolder in enumerate(targetSets):
-        allfiles = os.listdir(eachfolder)
-        targetfiles = np.random.choice(allfiles, opt.shotnumber+1, replace=False)
-        for shotnumber, eachfile in enumerate(targetfiles):
-            imageFile = Image.open(eachfolder + '/' + eachfile).convert('RGB')
-            temp_random = np.random.uniform()
-            rotate = np.random.choice([0,90,270],1,replace=False)
-            imageFile = imageFile.rotate(rotate[0])
-            imageProcess = preprocess(imageFile)
-            if eachfile != targetfiles[-1]:
-                trainingImages[waynumber*opt.shotnumber + shotnumber, 0, :, :].data.copy_(imageProcess[0,:,:])
-                trainingLables[waynumber*opt.shotnumber + shotnumber, waynumber].data.fill_(1.0)
-            else:
-                testImages[waynumber, 0, :, :].data.copy_(imageProcess[0,:,:])
-                testLables[waynumber, waynumber].data.fill_(1.0)
-    return trainingImages, trainingLables, testImages, testLables
 
 def cosine_similarity(x1, x2, dim=1, eps=1e-8):
     """Direct copy from pytorch orginal source code
@@ -101,7 +78,6 @@ class featureNet(nn.Module):
                 nn.ReLU(inplace = True),
                 nn.MaxPool2d(kernel_size = 2),
                 
-                
                 nn.Conv2d(
                     in_channels = 64,
                     out_channels = 64,
@@ -112,22 +88,11 @@ class featureNet(nn.Module):
                 nn.BatchNorm2d(64),
                 nn.ReLU(inplace = True),
                 nn.MaxPool2d(kernel_size = 2),
-                
-                # nn.Conv2d(
-                    # in_channels = 64,
-                    # out_channels = 64,
-                    # kernel_size = 3,
-                    # stride = 1,
-                    # padding = 0
-                    # ),
-                # nn.BatchNorm2d(64),
-                # nn.ReLU(inplace = True),
-                # nn.MaxPool2d(kernel_size = 2),
-
                 )
+        
     def forward(self, x):
         output = self.model(x)
-        return output.view(-1,64)
+        return output.view(-1,64).unsqueeze(1)
 
 
 class AttenLSTMCell(nn.Module):
@@ -167,13 +132,8 @@ class AttenLSTMCell(nn.Module):
         h_1 = torch.sigmoid(o) * torch.tanh(c_1)
         return h_1, c_1
 
-    def __repr__(self):
-        s = '{name}({input_size}, {featureDim})'
-        return s.format(name=self.__class__.__name__, **self.__dict__)
 
-
-
-def attLSTM(nn.Module):
+class attLSTM(nn.Module):
     def __init__(self, featureDim):
         super(attLSTM, self).__init__()
         self.featureDim = featureDim
@@ -183,90 +143,115 @@ def attLSTM(nn.Module):
         self.attLSTMcell = AttenLSTMCell(self.featureDim)
     
     def init_hidden(self, hidden_dim):
-        return Variable(torch.randn(1, self.hidden_dim))
+        return Variable(torch.randn(1, hidden_dim)).cuda()
 
     def updateHidden_r(self, trainF):
-        att_ = F.sofrmax(torch.mm(self.hidden_h, torch.transpose(trainF, 0, 1)))
+        att_ = F.softmax(torch.mm(self.hidden_h, torch.transpose(trainF, 0, 1)))
         att = torch.transpose(att_,0,1).repeat(1, self.featureDim)
         self.hidden_r = torch.sum(att * trainF, 0)
         
-    def forward(x):
-        trainF, testF = x
+    def forward(self, x):
+        (trainF, testF) = x
         trainNumber, _, _ = trainF.size()
-        self.hidden_h , self.hidden_c= attLSTMcell(testF, 
+        
+        self.hidden_h , self.hidden_c= self.attLSTMcell(testF, 
                 (torch.cat((self.hidden_h, self.hidden_r),1), self.hidden_c))
         self.hidden_h = self.hidden_h + testF
         self.updateHidden_r(trainF.view(trainNumber, -1))
         return self.hidden_h
 
-def matchingNet(nn.Module):
+class matchingNet(nn.Module):
     def __init__(self, trainingSampleNumber, testSampleNumber, featureDim):
         super(matchingNet, self).__init__()
+        self.trainingSampleNumber = trainingSampleNumber
+        self.testSampleNumber = testSampleNumber
         self.featureDim = featureDim
         self.featureGenNet = featureNet()
         self.conEmbed_G = nn.LSTM(self.featureDim, self.featureDim, bidirectional = True)
         self.conEmbed_F = attLSTM(self.featureDim)
         self.hidden_G = self.init_hidden_G(self.featureDim)
-        self.cond_feature_train = Variable(torch.FloatTensor(trainingSampleNumber, 1, self.featureDim))
-        self.cond_feature_test = Variable(torch.FloatTensor(testSampleNumber, 1, self.featureDim))
+        self.cond_feature_train = Variable(torch.FloatTensor(self.trainingSampleNumber, 1, self.featureDim)).cuda()
+        self.cond_feature_test = Variable(torch.FloatTensor(self.testSampleNumber, 1, self.featureDim)).cuda()
+
     def init_hidden_G(self, hidden_dim):
-         return (Variable(torch.randn(2, 1, self.hidden_dim)),
-                 Variable(torch.randn(2, 1, self.hidden_dim)))
+         return (Variable(torch.randn(2, 1, hidden_dim)).cuda(),
+                 Variable(torch.randn(2, 1, hidden_dim)).cuda())
    
     def getCondEmbed_G(self, feature_train):
         totalOutput, self.hidden_G = self.conEmbed_G(feature_train, self.hidden_G)
         sampleNumber, _, doubleHidden_dim = totalOutput.size()
         for i in range(sampleNumber):
-            self.cond_feature_train[i,:,:].data.fill_(totalOutput[i,:,0:doubleHidden_dim/2] + 
-                    totalOutput[trainingSampleNumber - i,:,doubleHidden_dim/2:None] +
-                    feature_train[i,:,:])
+            self.cond_feature_train[i,:,:] = totalOutput[i,:,0:doubleHidden_dim/2] + \
+            totalOutput[self.trainingSampleNumber - 1 - i,:,doubleHidden_dim/2:None] + \
+            feature_train[i,:,:]
     
     def getCondEmbed_F(self, feature_train, feature_test):
         sampleNumber, _, _= feature_test.size()
         for i in range(sampleNumber):
-            self.cond_feature_test[i,:,:].data.fill_(self.conEmbed_F((feature_train, feature_test[i,:,:])))
+            self.cond_feature_test[i,:,:] = self.conEmbed_F((feature_train, feature_test[i,:,:]))
     
     def predictLabel(self, vec1, mat1, label1):
         sampleNumber,_ ,_ = mat1.size()
         mat2 = vec1.repeat(sampleNumber, 1)
+        mat1 = torch.squeeze(mat1, 1)
         temp_sim = cosine_similarity(mat2, mat1, 1) 
-        temp_att = F.sofxmax(temp_sim)
-        return torch.mm(torch.unsqueeze(temp_att,0), label1)  
+        temp_att = F.softmax(temp_sim)
+        temp_result = torch.mm(torch.unsqueeze(temp_att,0), label1)  
+        return temp_result
     
-    def getLabel(trainLabel):
+    def getLabel(self, trainLabel):
         sampleNumber = self.cond_feature_test.size()[0]
-        temp_predictLabel = Variable(torch.FloatTensor(sampleNumber, opt.waynumber))
+        temp_predictLabel = Variable(torch.FloatTensor(sampleNumber, opt.waynumber)).cuda()
         for i in range(sampleNumber):
-            temp_predictLabel[i,:] = predictLabel(self.cond_feature_test[i,:,:], self.cond_feature_train, trainLabel) 
+            temp_predictLabel[i,:] = self.predictLabel(self.cond_feature_test[i,:,:], self.cond_feature_train, trainLabel) 
         return temp_predictLabel
 
-    def forward(x):
+    def forward(self, x):
         trainIm, trainLabel, testIm, testLabel = x
-        feature_train = featureGenNet(trainIm)
-        feature_test = featureGenNet(testIm)
-        getCondEmbed_G(feature_train)
-        getCondEmbed_F(feature_train, feature_test)
-        return getLabel(trainLabel)
+        feature_train = self.featureGenNet(trainIm)
+        feature_test = self.featureGenNet(testIm)
+        self.getCondEmbed_G(feature_train)
+        self.getCondEmbed_F(feature_train, feature_test)
+        return self.getLabel(trainLabel)
 
 ourMatchingNet = matchingNet(opt.waynumber * opt.shotnumber, opt.waynumber, 64)
 ourMatchingNet.cuda()
-print ourMatchingNet
+print (ourMatchingNet)
 
+trainingImages = Variable(torch.FloatTensor(opt.shotnumber * opt.waynumber, 1, opt.imageSize, opt.imageSize)).cuda()
+trainingLables = Variable(torch.FloatTensor(opt.shotnumber * opt.waynumber, opt.waynumber)).cuda()
+testImages = Variable(torch.FloatTensor(opt.waynumber, 1, opt.imageSize, opt.imageSize)).cuda()
+testLables = Variable(torch.LongTensor(opt.waynumber)).cuda()
+def generateOneTrainingSet() :
+    targetSets = np.random.choice(trainingPaths, opt.waynumber, replace=False)
+    trainingLables.data.zero_()
+    testLables.data.zero_()
+    for waynumber, eachfolder in enumerate(targetSets):
+        allfiles = os.listdir(eachfolder)
+        targetfiles = np.random.choice(allfiles, opt.shotnumber+1, replace=False)
+        for shotnumber, eachfile in enumerate(targetfiles):
+            imageFile = Image.open(eachfolder + '/' + eachfile).convert('RGB')
+            temp_random = np.random.uniform()
+            rotate = np.random.choice([0,90,270],1,replace=False)
+            imageFile = imageFile.rotate(rotate[0])
+            imageProcess = preprocess(imageFile)
+            if eachfile != targetfiles[-1]:
+                trainingImages[waynumber*opt.shotnumber + shotnumber, 0, :, :].data.copy_(imageProcess[0,:,:])
+                trainingLables[waynumber*opt.shotnumber + shotnumber, waynumber] = 1.0
+            else:
+                testImages[waynumber, 0, :, :].data.copy_(imageProcess[0,:,:])
+                testLables[waynumber] = waynumber
+m = nn.LogSoftmax()
 loss_function = nn.NLLLoss()
 optimizer_matchNet = optim.Adam(ourMatchingNet.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999) )
-for iterNumber in range(opt.num_round):
-    start = time()
+for iterNumber in range(opt.trainround):
+    start = time.time()
     ourMatchingNet.zero_grad()
-    trainIm, trainLabel,  testIm, testLabel = generateOneTrainingSet()
-    trainIm = trainIm.cuda()
-    trainLabel = trainLabel.cuda()
-    testIm = testIm.cuda()
-    testLabel = testLabel.cuda()
-    output = ourMatchingNet((trainIm, trainLabel,  testIm, testLabel))
-    error = loss_function(output, trainLabel)
+    generateOneTrainingSet()
+    output = ourMatchingNet((trainingImages, trainingLables,  testImages, testLables))
+    error = loss_function(m(output), testLables)
     error.backward()
     optimizer_matchNet.step()
-    sopt = time()
-    print ('[%d/%d] round, loss: %.4f, time %.4f' % (iterNumber, opt.num_round, error.data[0], stop-start))
-
+    stop = time.time()
+    print ('[%d/%d] round, loss: %.4f, time %.4f' % (iterNumber, opt.trainround, error.data[0], stop-start))
 
